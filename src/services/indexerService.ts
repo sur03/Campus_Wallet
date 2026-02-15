@@ -9,6 +9,7 @@
 import algosdk from 'algosdk';
 import { getIndexerConfig } from '../utils/algorand';
 import { ContractState, Contribution } from '../types/campaign';
+import { SpendingTransaction } from '../types/spending';
 
 /**
  * Get Algorand Indexer client
@@ -30,8 +31,8 @@ export async function getContractBalance(contractAddress: string): Promise<numbe
         const indexer = getIndexerClient();
         const accountInfo = await indexer.lookupAccountByID(contractAddress).do();
 
-        // Convert microALGOs to ALGO
-        const balance = accountInfo.account.amount / 1_000_000;
+        // Convert microALGOs to ALGO - Fix BigInt for algosdk v3
+        const balance = Number(accountInfo.account.amount) / 1_000_000;
 
         console.log(`📊 Contract ${contractAddress} balance: ${balance} ALGO`);
         return balance;
@@ -225,4 +226,136 @@ export function getCampaignStatus(
     }
 
     return isGoalMet(totalCollected, goal) ? 'successful' : 'failed';
+}
+
+/**
+ * Get spending transactions (outgoing payments from wallet)
+ * 
+ * @param walletAddress - Spending wallet address
+ * @param limit - Maximum number of transactions to fetch
+ * @returns Array of spending transactions
+ */
+export async function getSpendingTransactions(
+    walletAddress: string,
+    limit: number = 100
+): Promise<SpendingTransaction[]> {
+    try {
+        const indexer = getIndexerClient();
+
+        // Query all payment transactions from this wallet
+        const response = await indexer
+            .searchForTransactions()
+            .address(walletAddress)
+            .txType('pay')
+            .limit(limit)
+            .do();
+
+        const transactions: SpendingTransaction[] = [];
+
+        if (response.transactions && Array.isArray(response.transactions)) {
+            for (const txn of response.transactions) {
+                // Only count OUTGOING payments (sender = spending wallet)
+                if (txn.sender === walletAddress) {
+                    const receiver = txn.paymentTransaction?.receiver || txn['payment-transaction']?.receiver;
+                    const amount = (txn.paymentTransaction?.amount || txn['payment-transaction']?.amount || 0) / 1_000_000;
+                    const timestamp = txn.roundTime || txn['round-time'] || 0;
+
+                    // Decode memo from note field
+                    let memo: string | undefined;
+                    if (txn.note) {
+                        try {
+                            const noteBytes = Uint8Array.from(atob(txn.note), c => c.charCodeAt(0));
+                            memo = new TextDecoder().decode(noteBytes);
+                        } catch (e) {
+                            // Ignore decode errors
+                        }
+                    }
+
+                    transactions.push({
+                        txId: txn.id,
+                        amount,
+                        receiver,
+                        memo,
+                        timestamp,
+                        explorerUrl: `https://testnet.algoexplorer.io/tx/${txn.id}`,
+                    });
+                }
+            }
+        }
+
+        console.log(`💸 Found ${transactions.length} spending transactions for ${walletAddress}`);
+        return transactions;
+    } catch (error: any) {
+        // 404 is expected for new wallets
+        if (error.status === 404 || error.message?.includes('no accounts found')) {
+            console.log(`ℹ️ Wallet ${walletAddress} not yet indexed`);
+            return [];
+        }
+
+        console.error('Error fetching spending transactions:', error);
+        return [];
+    }
+}
+
+/**
+ * Get total amount spent from wallet
+ * 
+ * @param walletAddress - Spending wallet address
+ * @returns Total spent in ALGO
+ */
+export async function getTotalSpent(walletAddress: string): Promise<number> {
+    try {
+        const transactions = await getSpendingTransactions(walletAddress);
+        const total = transactions.reduce((sum, tx) => sum + tx.amount, 0);
+
+        console.log(`💰 Total spent from ${walletAddress}: ${total} ALGO`);
+        return total;
+    } catch (error) {
+        console.error('Error calculating total spent:', error);
+        return 0;
+    }
+}
+
+/**
+ * Get withdrawal transaction (contract → wallet)
+ * 
+ * Finds the transaction where funds were withdrawn from contract to spending wallet.
+ * 
+ * @param contractAddress - Smart contract address
+ * @param recipientAddress - Spending wallet address
+ * @returns Withdrawn amount in ALGO
+ */
+export async function getWithdrawalAmount(
+    contractAddress: string,
+    recipientAddress: string
+): Promise<number> {
+    try {
+        const indexer = getIndexerClient();
+
+        // Query transactions from contract
+        const response = await indexer
+            .searchForTransactions()
+            .address(contractAddress)
+            .txType('pay')
+            .limit(50)
+            .do();
+
+        if (response.transactions && Array.isArray(response.transactions)) {
+            for (const txn of response.transactions) {
+                // Find payment FROM contract TO recipient
+                const receiver = txn.paymentTransaction?.receiver || txn['payment-transaction']?.receiver;
+                if (txn.sender === contractAddress && receiver === recipientAddress) {
+                    const amount = (txn.paymentTransaction?.amount || txn['payment-transaction']?.amount || 0) / 1_000_000;
+                    console.log(`📤 Withdrawal found: ${amount} ALGO from ${contractAddress} to ${recipientAddress}`);
+                    return amount;
+                }
+            }
+        }
+
+        console.log(`ℹ️ No withdrawal found from ${contractAddress} to ${recipientAddress}`);
+        return 0;
+    } catch (error) {
+        console.error('Error fetching withdrawal transaction:', error);
+        return 0;
+    }
 }
