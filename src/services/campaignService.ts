@@ -8,6 +8,7 @@
 
 import { Campaign, CampaignFormData } from '../types/campaign';
 import { getContractBalance, getContractState, getCampaignStatus } from './indexerService';
+import { createSpendingGroupForCampaign } from './spendingGroupService';
 
 // In-memory storage for demo
 // In production, use Firebase/Supabase
@@ -15,6 +16,8 @@ let campaignRegistry: Campaign[] = [];
 
 /**
  * Save campaign metadata after deployment
+ * 
+ * Also auto-creates spending group for lifecycle tracking.
  */
 export async function saveCampaignMetadata(campaign: {
     contractAddress: string;
@@ -46,11 +49,18 @@ export async function saveCampaignMetadata(campaign: {
 
         campaignRegistry.push(newCampaign);
 
-        // In production, save to Firebase/Supabase
-        console.log('✅ Campaign metadata saved:', newCampaign);
-
         // Save to localStorage for persistence
         localStorage.setItem('campaigns', JSON.stringify(campaignRegistry));
+
+        // Auto-create spending group (with NULL wallet address)
+        await createSpendingGroupForCampaign({
+            campaignId: newCampaign.contractAddress,
+            clubName: newCampaign.clubName,
+            fundingContractAddress: newCampaign.contractAddress,
+            organizerAddress: newCampaign.organizerAddress,
+        });
+
+        console.log('✅ Campaign and spending group created:', newCampaign.title);
     } catch (error) {
         console.error('Error saving campaign metadata:', error);
         throw error;
